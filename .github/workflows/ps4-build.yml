@@ -1,0 +1,94 @@
+name: PS4 Dolphin - toolchain bootstrap
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - work/ps4-13.52-14.00-validation
+    paths:
+      - "toolchain/**"
+      - ".github/workflows/ps4-build.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ps4-dolphin-toolchain-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  toolchain:
+    name: Build PS4 C++ runtime
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Install host build tools
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates curl git cmake ninja-build python3 python3-pip python3-venv python3-pil meson pkg-config build-essential autoconf libtool nasm libarchive-tools
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" | sudo tee /etc/apt/sources.list.d/llvm-21.list
+          sudo apt-get update
+          sudo apt-get install -y clang-21 lld-21 llvm-21 llvm-21-tools
+
+      - name: Install PacBrew OpenOrbis
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get install -y pacman-package-manager makepkg
+          sudo cp /etc/pacman.conf /etc/pacman.conf.backup
+          if ! grep -q '^\[pacbrew\]' /etc/pacman.conf; then
+            printf '\n[pacbrew]\nSigLevel = Optional TrustAll\nServer = https://pacman.mydedibox.fr/pacbrew/packages/\n' | sudo tee -a /etc/pacman.conf
+          fi
+          sudo pacman -Sy --noconfirm
+          sudo pacman -S --needed --noconfirm --disable-download-timeout ps4-openorbis ps4-openorbis-portlibs
+          test -f /opt/pacbrew/ps4/openorbis/ps4vars.sh
+          /opt/pacbrew/ps4/openorbis/bin/clang --version
+          pacman -Q | grep '^ps4-openorbis-' | tee openorbis-packages.txt
+
+      - name: Verify compiler versions
+        shell: bash
+        run: |
+          set -euxo pipefail
+          clang-21 --version
+          clang++-21 --version
+          ld.lld-21 --version
+          llvm-ar-21 --version
+          cmake --version
+          ninja --version
+          python3 --version
+          meson --version
+
+      - name: Build libc++ for PS4
+        shell: bash
+        run: |
+          set -euxo pipefail
+          chmod +x toolchain/*.sh toolchain/bin/*
+          bash toolchain/build-libcxx.sh
+
+      - name: Build PS4 runtime
+        shell: bash
+        run: |
+          set -euxo pipefail
+          bash toolchain/build-runtime.sh
+          test -s "$HOME/dolphinps4-build/sysroot/lib/libc++.a"
+          test -s "$HOME/dolphinps4-build/sysroot/lib/libdolphinps4_rt.a"
+          ls -lh "$HOME/dolphinps4-build/sysroot/lib"
+
+      - name: Upload toolchain artifacts
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dolphinps4-sysroot-${{ github.run_number }}
+          path: |
+            /home/runner/dolphinps4-build/sysroot/
+            openorbis-packages.txt
+          if-no-files-found: error
+          compression-level: 6
+          retention-days: 14
