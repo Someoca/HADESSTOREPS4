@@ -96,7 +96,7 @@ jobs:
           set -euxo pipefail
           mkdir -p "$PS4_BUILD_ROOT/host-tools/bin"
           python3 -m venv "$PS4_BUILD_ROOT/mesa-venv"
-          "$PS4_BUILD_ROOT/mesa-venv/bin/pip" install --upgrade pip meson mako pyyaml
+          "$PS4_BUILD_ROOT/mesa-venv/bin/pip" install --upgrade pip meson mako pyyaml packaging
           echo "$PS4_BUILD_ROOT/mesa-venv/bin" >> "$GITHUB_PATH"
           "$PS4_BUILD_ROOT/mesa-venv/bin/meson" --version
           test -x /usr/bin/glslangValidator
