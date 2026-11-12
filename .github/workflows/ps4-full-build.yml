@@ -1,0 +1,137 @@
+name: PS4 Dolphin - full build
+
+on:
+  workflow_dispatch:
+    inputs:
+      app_version:
+        description: "Versao do aplicativo (formato XX.YY)"
+        required: true
+        default: "02.95"
+  push:
+    branches:
+      - work/ps4-13.52-14.00-validation
+    paths:
+      - "patches/**"
+      - "port/**"
+      - "scripts/**"
+      - "sce_sys/**"
+      - "xmb/**"
+      - ".github/workflows/ps4-full-build.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ps4-dolphin-full-build-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  full-build:
+    name: Mesa + Dolphin + PS4 PKG
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    env:
+      PS4_BUILD_ROOT: /home/runner/dolphinps4-build
+      OPENORBIS: /opt/pacbrew/ps4/openorbis
+      DOLPHIN_PS4_VERSION: ${{ inputs.app_version || '02.95' }}
+      JOBS: 4
+
+    steps:
+      - name: Checkout project
+        uses: actions/checkout@v4
+
+      - name: Install host dependencies
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates curl git cmake ninja-build python3 python3-pip python3-venv python3-pil meson pkg-config build-essential autoconf libtool nasm libarchive-tools glslang-tools
+          curl -fsSL https://apt.llvm.org/llvm-snapshot.gpg.key | sudo gpg --dearmor -o /usr/share/keyrings/llvm-archive-keyring.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm-archive-keyring.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-21 main" | sudo tee /etc/apt/sources.list.d/llvm-21.list
+          sudo apt-get update
+          sudo apt-get install -y clang-21 lld-21 llvm-21 llvm-21-tools
+
+      - name: Install PacBrew OpenOrbis
+        shell: bash
+        run: |
+          set -euxo pipefail
+          sudo apt-get install -y pacman-package-manager makepkg
+          if ! grep -q '^\[pacbrew\]' /etc/pacman.conf; then
+            printf '\n[pacbrew]\nSigLevel = Optional TrustAll\nServer = https://pacman.mydedibox.fr/pacbrew/packages/\n' | sudo tee -a /etc/pacman.conf
+          fi
+          sudo pacman -Sy --noconfirm
+          sudo pacman -S --needed --noconfirm --disable-download-timeout ps4-openorbis ps4-openorbis-portlibs
+          test -f "$OPENORBIS/ps4vars.sh"
+          "$OPENORBIS/bin/clang" --version
+          pacman -Q | grep '^ps4-openorbis-' | tee openorbis-packages.txt
+
+      - name: Build PS4 C++ sysroot and runtime
+        shell: bash
+        run: |
+          set -euxo pipefail
+          chmod +x toolchain/*.sh toolchain/bin/* scripts/*.sh
+          bash toolchain/build-libcxx.sh
+          bash toolchain/build-runtime.sh
+          test -s "$PS4_BUILD_ROOT/sysroot/lib/libc++.a"
+          test -s "$PS4_BUILD_ROOT/sysroot/lib/libdolphinps4_rt.a"
+
+      - name: Fetch pinned Dolphin, Mesa and libdrm sources
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p "$PS4_BUILD_ROOT/src" "$PS4_BUILD_ROOT/host-tools/bin"
+          git clone https://github.com/dolphin-emu/dolphin.git "$PS4_BUILD_ROOT/src/dolphin"
+          git -C "$PS4_BUILD_ROOT/src/dolphin" checkout 771fb154059c5812d6a715a23226249cc42877a2
+          git -C "$PS4_BUILD_ROOT/src/dolphin" submodule update --init --recursive
+          git -C "$PS4_BUILD_ROOT/src/dolphin" apply "$GITHUB_WORKSPACE/patches/dolphin-ps4.patch"
+          git clone --depth 1 --branch mesa-26.0.8 https://gitlab.freedesktop.org/mesa/mesa.git "$PS4_BUILD_ROOT/src/mesa"
+          git -C "$PS4_BUILD_ROOT/src/mesa" apply "$GITHUB_WORKSPACE/patches/mesa-ps4.patch"
+          git clone --depth 1 --branch libdrm-2.4.125 https://gitlab.freedesktop.org/mesa/drm.git "$PS4_BUILD_ROOT/src/libdrm"
+          git -C "$PS4_BUILD_ROOT/src/dolphin" rev-parse HEAD
+          git -C "$PS4_BUILD_ROOT/src/mesa" rev-parse HEAD
+
+      - name: Prepare Mesa Python environment and host glslang
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 -m venv "$PS4_BUILD_ROOT/mesa-venv"
+          "$PS4_BUILD_ROOT/mesa-venv/bin/pip" install --upgrade pip mako pyyaml
+          cmake -S "$PS4_BUILD_ROOT/src/dolphin/Externals/glslang" -B "$PS4_BUILD_ROOT/build/glslang-host" -G Ninja -DCMAKE_BUILD_TYPE=Release -DENABLE_GLSLANG_BINARIES=ON -DENABLE_SPVREMAPPER=OFF
+          cmake --build "$PS4_BUILD_ROOT/build/glslang-host" --target glslangValidator -j4
+          find "$PS4_BUILD_ROOT/build/glslang-host" -type f -name glslangValidator -executable -print -quit | grep . | xargs -I{} cp {} "$PS4_BUILD_ROOT/host-tools/bin/glslangValidator"
+          "$PS4_BUILD_ROOT/host-tools/bin/glslangValidator" --version
+
+      - name: Build Mesa RADV for PS4
+        shell: bash
+        run: |
+          set -euxo pipefail
+          bash scripts/build-mesa.sh setup
+
+      - name: Configure and build Dolphin
+        shell: bash
+        run: |
+          set -euxo pipefail
+          bash scripts/configure-dolphin.sh
+          bash scripts/build-dolphin.sh
+
+      - name: Create PS4 PKG and update archive
+        shell: bash
+        run: |
+          set -euxo pipefail
+          DOLPHIN_PS4_VERSION="$DOLPHIN_PS4_VERSION" bash scripts/package-dolphin.sh
+          find "$PS4_BUILD_ROOT/out" -maxdepth 1 -type f \( -name '*.pkg' -o -name '*.tar' \) -printf '%f %s bytes\n'
+          test -n "$(find "$PS4_BUILD_ROOT/out" -maxdepth 1 -type f -name '*.pkg' -print -quit)"
+
+      - name: Upload PS4 package and symbols
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dolphinps4-pkg-${{ github.run_number }}
+          path: |
+            /home/runner/dolphinps4-build/out/*.pkg
+            /home/runner/dolphinps4-build/out/*.tar
+            /home/runner/dolphinps4-build/oelf/*.oelf
+            openorbis-packages.txt
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
