@@ -94,11 +94,11 @@ jobs:
         shell: bash
         run: |
           set -euxo pipefail
+          mkdir -p "$PS4_BUILD_ROOT/host-tools/bin"
           python3 -m venv "$PS4_BUILD_ROOT/mesa-venv"
           "$PS4_BUILD_ROOT/mesa-venv/bin/pip" install --upgrade pip mako pyyaml
-          cmake -S "$PS4_BUILD_ROOT/src/dolphin/Externals/glslang" -B "$PS4_BUILD_ROOT/build/glslang-host" -G Ninja -DCMAKE_BUILD_TYPE=Release -DENABLE_GLSLANG_BINARIES=ON -DENABLE_SPVREMAPPER=OFF
-          cmake --build "$PS4_BUILD_ROOT/build/glslang-host" --target glslangValidator -j4
-          find "$PS4_BUILD_ROOT/build/glslang-host" -type f -name glslangValidator -executable -print -quit | grep . | xargs -I{} cp {} "$PS4_BUILD_ROOT/host-tools/bin/glslangValidator"
+          test -x /usr/bin/glslangValidator
+          cp /usr/bin/glslangValidator "$PS4_BUILD_ROOT/host-tools/bin/glslangValidator"
           "$PS4_BUILD_ROOT/host-tools/bin/glslangValidator" --version
 
       - name: Build Mesa RADV for PS4
